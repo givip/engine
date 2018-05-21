@@ -29,6 +29,7 @@ public final class HTTPServer {
         hostname: String,
         port: Int,
         responder: R,
+        tlsConfig: TLSConfiguration? = nil,
         maxBodySize: Int = 1_000_000,
         backlog: Int = 256,
         reuseAddress: Bool = true,
@@ -44,23 +45,42 @@ public final class HTTPServer {
 
             // Set the handlers that are applied to the accepted Channels
             .childChannelInitializer { channel in
+                var tlsHandler: OpenSSLServerHandler?
+                if let tls = tlsConfig {
+                    let sslContext = try! SSLContext(configuration: tls)
+                    tlsHandler = try! OpenSSLServerHandler(context: sslContext)
+                }
+                
                 // create HTTPServerResponder-based handler
-                let handler = HTTPServerHandler(responder: responder, maxBodySize: maxBodySize, onError: onError)
-
+                let handler = HTTP.HTTPServerHandler(responder: responder, maxBodySize: maxBodySize, onError: onError)
+                
                 // re-use subcontainer for an event loop here
                 let upgrade: HTTPUpgradeConfiguration = (upgraders: upgraders, completionHandler: { ctx in
                     // shouldn't need to wait for this
                     _ = channel.pipeline.remove(handler: handler)
+                    if let handler = tlsHandler {
+                        _ = channel.pipeline.remove(handler: handler)
+                    }
                 })
 
                 // configure the pipeline
-                return channel.pipeline.configureHTTPServerPipeline(
-                    withPipeliningAssistance: false,
-                    withServerUpgrade: upgrade,
-                    withErrorHandling: false
-                ).then {
-                    return channel.pipeline.add(handler: handler)
+                let server = channel.pipeline
+                    .configureHTTPServerPipeline(
+                        withPipeliningAssistance: false,
+                        withServerUpgrade: upgrade,
+                        withErrorHandling: false
+                    )
+                    .then {
+                        return channel.pipeline.add(handler: handler)
                 }
+                
+                if let tls = tlsHandler {
+                    return server.then {
+                        return channel.pipeline.addHandlers(tls, first: true)
+                    }
+                }
+                
+                return server
             }
 
             // Enable TCP_NODELAY and SO_REUSEADDR for the accepted Channels
